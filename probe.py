@@ -6,16 +6,41 @@ import string     # helps parse strings
 import datetime as dt
 import pandas as pd
 
+class ProbeDiagnostics:
+                                                                 
+	# Restart Codes('Status') 300ms
+	stat_powered_off = "P"             
+	stat_software_reset = "S"
+	stat_brown_out = "B"
+	stat_watchdog = "W"
+	stat_unknown = "U"
+
+	def __init__(self, probe_type, address):
+		self.address = address
+		self.probe_type = probe_type
+		self.last_restart_code = stat_powered_off
+		self.voltage = 0.0 # init value(software)
+		self.protocol_lock = 0 #off(default hardware value)
+
+		#probe specific
+		ph_temp_compensation = None
+		ph_slope = None
+
+		rtd_scale = "c" #celsius(default hardware value)
+
+	def __repr__(self):
+		pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+
 class AtlasI2C:
 	long_timeout = 1.5         	# the timeout needed to query readings and calibrations
-	short_timeout = .5         	# timeout for regular commands
+	short_timeout = .35         	# timeout for regular commands
 	default_bus = 1         	# the default bus for I2C on the newer Raspberry Pis, certain older boards use bus 0
 	default_address = 98     	# the default address for the sensor
 	current_addr = default_address
 	std_addr = {'DO': 97, 'ORP':98, 'PH':99, 'EC':100, 'RTD':102, 'PMP':103}
 	probe_data_store = 'probe_store.h5'
 
-	def __init__(self, addresses=[default_address], bus=default_bus, store_data=True):
+	def __init__(self, addresses=[default_address], bus=default_bus, store_data=False):
 		# open two file streams, one for reading and one for writing
 		# the specific I2C channel is selected with bus
 		# it is usually 1, except for older revisions where its 0
@@ -27,19 +52,21 @@ class AtlasI2C:
 		#create dict of connected probes and associated readings(all values start at 0.0
 		i2c_devices = self.list_i2c_devices()
 		probe_to_reading = {}
-		for probe, address in std_addr.iteritems():
+		probe_to_diagnostics = {}
+		for probe, address in std_addr.items():
 			if address in i2c_devices:
 				probe_to_reading[probe] = 0.0 # add probe to dict
+				probe_to_diagnostics = "No diagnostics..."
 
 		# merge two dicts for eventual pd.dataframe
 		data_dict = {**{'datetime':[dt.datetime.now()]},
 					 **{key:[value] for (key, value) in probe_to_reading}}
-
+		# I dislike the following pattern thoroughly, must be a better way
 		self.probe_dataframe = pd.DataFrame(data_dict, columns = data_dict.keys())
 		self.probe_dataframe.index = self.probe_dataframe['datetime']
-		del df['datetime']
-
-
+		del df['datetime'] 
+		#set file we will write data to(hdf5 currently)
+		self.store_data = store_data
 
 	def set_i2c_address(self, addr):
 		# set the I2C communications to the slave specified by the address
@@ -83,34 +110,60 @@ class AtlasI2C:
 
 		return self.read()
 
-	def read_all_probes(query = "R"):
+	def read_all_probes():
 		'''
 			Write to probes(query by defualt) and wait, then read from each address, 
 			and update reading(s) dict.  Is there a better/cleaner way to do this...?
 		'''
 		#start_time = dt.datetime.now()
-		for probe, address in std_addr.iteritems():
+		for probe, address in std_addr.items():
 			self.set_i2c_address(address)
+			if probe == "PH": # tmperature compensation for PH probe
+				self.write("RT,{0}".format(probe_to_reading["RTD"])) # assumes we have probe defaulting to centigrade
 			self.write(query)
 		time.sleep(self.long_timeout)
-		for probe, address in std_addr.iteritems():
+		for probe, address in std_addr.items():
 			self.set_i2c_address(address)
-			self.probe_to_reading[probe] = self.read()
+			self.probe_to_reading[probe] = float(self.read())
 		#end_time = dt.datetime.now()
 
 		self.store_data()
 
-	def store_data(self, max_samples = 60*60):
+	def probe_diagnostics():
 
+		for probe, address in std_addr.items():
+			self.set_i2c_address(address)
+			self.write("I")
+			time.sleep(self.short_timeout)
+			reading = str.split(self.read(), ",")
+			probe_name = reading[1] #
+			firmware = reading[2] #
+
+			if probe != probe_name:
+				raise Exception("Unexpected probe type, it appears this probe doesn't correspond to default addresses...")
+
+			if probe == "PH":
+				self.write("Slope")
+				time.sleep(self.short_timeout)
+				reading = str.split(self.read(), ",")
+				acid_accuracy = float(reading[1])
+				base_accuracy = float(reading[2])
+
+
+	def store_data(self, max_samples = 60*60):
+		'''
+			This is not meant to be highly performant, if it was we would have to address appends I believe
+		'''
 		now = dt.datetime.now()
-		data = {key:[value] for (key, value) in self.probe_to_reading}
+		data = {key:[value] for (key, value) in self.probe_to_reading} #we could just make it a list in read_all_probes func
 		self.probe_dataframe = self.probe_dataframe.append(pd.DataFrame(data, index = [now]))
 
 		if len(self.probe_dataframe) >= max_samples:
 			# we write half data to disk and keep the rest in memory for potential data analysis
 			save_frame = self.probe_dataframe.tail(max_samples/2)
 			self.probe_dataframe = self.probe_dataframe.head(max_samples/2)
-			save_frame.to_hd5(probe_data_store)
+			if self.store_data:
+				save_frame.to_hd5(probe_data_store)
 
 	def close(self):
 		self.file_read.close()
@@ -138,35 +191,35 @@ class AtlasI2C:
 
 def main():
 
-device = AtlasI2C()
-device.print_i2c_devices()
+	device = AtlasI2C()
+	device.print_i2c_devices()
 
-while True:
+	while True:
 
-	inputt = input("Enter command: ")
+		inputt = input("Enter command: ")
 
-	if inputt.upper().startswith("LIST_ADDR"):
-		device.print_i2c_devices()
+		if inputt.upper().startswith("LIST_ADDR"):
+			device.print_i2c_devices()
 
-	# continuous polling command automatically polls the board
-	elif inputt.upper().startswith("RUN"):
+		# continuous polling command automatically polls the board
+		elif inputt.upper().startswith("RUN"):
 
-		try:
-			while True:
-				device.read_all_probes()
-				print(device.probe_to_reading)
-		except KeyboardInterrupt: 		# catches the ctrl-c command, which breaks the loop above
-			print("Continuous polling stopped")
-
-	# if not a special keyword, pass commands straight to board
-	else:
-		if len(inputt) == 0:
-			print ("Please input valid command.")
-		else:
 			try:
-				print(device.query(inputt))
-			except IOError:
-				print("Query failed \n - Address may be invalid, use List_addr command to see available addresses")
+				while True:
+					device.read_all_probes()
+					print(device.probe_to_reading)
+			except KeyboardInterrupt: 		# catches the ctrl-c command, which breaks the loop above
+				print("Continuous polling stopped")
+
+		# if not a special keyword, pass commands straight to board
+		else:
+			if len(inputt) == 0:
+				print ("Please input valid command.")
+			else:
+				try:
+					print(device.query(inputt))
+				except IOError:
+					print("Query failed \n - Address may be invalid, use List_addr command to see available addresses")
 
 
 

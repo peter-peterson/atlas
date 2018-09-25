@@ -112,6 +112,8 @@ def main():
 			device.set_i2c_address(addr)
 			print("I2C address set to " + str(addr))
 
+		elif inputt.upper().startswith("I"):
+			print(device.query("I"))
 		# continuous polling command automatically polls the board
 		elif inputt.upper().startswith("POLL"):
 			delaytime = float(str.split(inputt, ',')[1])
